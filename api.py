@@ -3,11 +3,15 @@ from typing import Any, List, Optional, Dict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import os, json, base64, time
+from buquebus_clientV2 import BuquebusClientV2
+from buquebus_clientUYU import BuquebusClientUYU
 
 from buquebus_client import BuquebusClient, LOG_FILE, log, CACHE_TOKEN_FILE
 
 app = FastAPI(title="Buquebus Price API", version="1.1.0")
 client = BuquebusClient(headless=True)
+client_v2 = BuquebusClientV2(headless=True)
+client_uyu = BuquebusClientUYU(headless=True)
 
 # ---------- Pydantic models ----------
 class PriceRequest(BaseModel):
@@ -171,3 +175,37 @@ def price_web_vehiculo(req: PriceRequest):
         log(f"/price/web-vehiculo error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/price/web-full")
+def price_web_full(req: PriceRequest):
+    try:
+        status, data = client.fetch_day_web_prices_full(
+            req.origen.upper(),
+            req.destino.upper(),
+            req.fecha
+        )
+        return {"status": status, "data": data}
+    except Exception as e:
+        log(f"/price/web-full error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/price/web-pro")
+def price_web_pro(req: PriceRequest):
+    try:
+        status, data = client_v2.fetch_day_web_prices_pro(
+            req.origen.upper(),
+            req.destino.upper(),
+            req.fecha
+        )
+        return {"status": status, "data": data}
+    except Exception as e:
+        log(f"/price/web-pro error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/price/web-pro-uyu")
+def price_web_pro_uyu(req: PriceRequest):
+    status, data = client_uyu.fetch_day_web_prices_pro(
+        req.origen.upper(),
+        req.destino.upper(),
+        req.fecha
+    )
+    return {"status": status, "data": data}

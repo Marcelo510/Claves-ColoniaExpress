@@ -351,7 +351,184 @@ class BuquebusClient:
             }
         }
 
+    def _post_day_pricing_economica(self, origen, destino, fecha, accomodation_code):
+        yy, mm, dd = self._normalize_date_to_yymmdd(fecha)
+        yymmdd = yy + mm + dd
+
+        payload = self._payload_day(origen, destino, yy, mm, dd, accomodation_code)
+
+        # 👇 CLAVE
+        payload["request"]["c_MTT_MultipleTariffTypeRequest"][0][
+            "m_TARF_TariffCodeTypeDescription"
+        ] = [
+            {"c_U282_TariffType": "ECONOMICA", "c_C113_PriceDetailRequested": "true"}
+        ]
+
+        return self._call_price_availability(payload)
+
+    def _totales_por_tarifa(self, raw_json, tarifa: str):
+        # 🔥 protección TOTAL
+        if not isinstance(raw_json, dict):
+            return {}
+
+        data = raw_json.get("data")
+        if isinstance(data, dict):
+            payload = data
+        else:
+            payload = raw_json
+
+        sailings = payload.get("sailingprice", [])
+        out = {}
+
+        for s in sailings:
+            r = s.get("c_RDR_RouteDateTimeResponse", {})
+            travel = r.get("m_ROUT_TravelRoute", {})
+            dep = r.get("m_DPDT_DepartureDateAndTime", {})
+            arr = r.get("c_ARDT_ArrivalDateAndTime", {})
+            ship = r.get("c_SHNM_ShipName", {})
+
+            code = travel.get("c_C276_SailingCode")
+            total = None
+
+            for t in s.get("c_TCT_TariffChargesTotals", []):
+                tipo = (
+                    t.get("c_QOR_QuotationBasisResponse", {})
+                    .get("m_TARF_TariffCodeTypeDescription", {})
+                    .get("c_U282_TariffType")
+                )
+
+                if tipo == tarifa:
+                    amt = (
+                        t.get("c_QLP_ChargesTotal", {})
+                        .get("m_CHTO_ChargeTotals", {})
+                        .get("m_U618_TotalAmount")
+                    )
+
+                    if amt and str(amt).upper() != "N/A":
+                        try:
+                            total = float(amt) / 100
+                        except Exception:
+                            total = None
+                    break
+
+            if code and total is not None:
+                hs = dep.get("m_U248_StandardDepartureTime")
+                ha = arr.get("c_U239_NominalArrivalTime")
+
+                out[code] = (
+                    total,
+                    hs[:2]+":"+hs[2:] if isinstance(hs, str) and len(hs)==4 else None,
+                    ha[:2]+":"+ha[2:] if isinstance(ha, str) and len(ha)==4 else None,
+                    ship.get("m_SHNM_ShipName")
+                )
+
+        return out
+
+
+    def _extract_classes_from_bundle(self, raw_json):
+        if not isinstance(raw_json, dict):
+            return []
+
+        sailings = raw_json.get("sailingprice", [])
+        out = []
+
+        for s in sailings:
+
+            r = s.get("c_RDR_RouteDateTimeResponse", {})
+            travel = r.get("m_ROUT_TravelRoute", {})
+            dep = r.get("m_DPDT_DepartureDateAndTime", {})
+            arr = r.get("c_ARDT_ArrivalDateAndTime", {})
+            ship = r.get("c_SHNM_ShipName", {})
+
+            code = travel.get("c_C276_SailingCode")
+
+            turista = None
+            business = None
+            primera = None
+            economica = None
+
+            for pp in s.get("productPrice", []):
+
+                tarifa = pp.get("c_U282_TariffType")
+
+                for acc in pp.get("c_ACR_AccomodationDetailsResponse", []):
+
+                    acdt = acc.get("m_ACDT_AccomodationDetails", {})
+                    seat = acdt.get("m_U220_ServiceAgreementDefinedAccomodationCode")
+
+                    acpl = acc.get("m_ACPL_AccomodationPlaces", {})
+                    total = acpl.get("c_U231_ChargePerUnit")
+
+                    if not total or str(total).upper() == "N/A":
+                        continue
+
+                    val = float(total) / 100
+
+                    # PROGRAMADA
+                    if tarifa == "PROGRAMADA":
+                        if seat == "TSEAT":
+                            turista = val
+                        elif seat == "BSEAT":
+                            business = val
+                        elif seat == "PRSEAT":
+                            primera = val
+
+                    # ECONOMICA
+                    elif tarifa == "ECONOMICA":
+                        if seat in ("ESEAT", "TSEAT"):
+                            economica = val
+
+            def hhmm(x):
+                return f"{x[:2]}:{x[2:]}" if isinstance(x,str) and len(x)==4 else x
+
+            diff = (business - turista) if (business and turista) else None
+
+            out.append({
+                "hora_salida": hhmm(dep.get("m_U248_StandardDepartureTime")),
+                "hora_llegada": hhmm(arr.get("c_U239_NominalArrivalTime")),
+                "barco": ship.get("m_SHNM_ShipName"),
+                "codigo": code,
+
+                "turista": turista,
+                "business": business,
+                "diferencia": diff,
+
+                "economica": economica,
+                "primera": primera,
+            })
+
+        return out
+
     # ---------- API públicos ----------
+
+    def fetch_day_web_prices_pro(self, origen, destino, fecha):
+        status, raw = self._post_day_all_classes(origen, destino, fecha)
+
+        if status != 200:
+            return status, raw
+
+        data = self._extract_classes_from_bundle(raw)
+
+        def fmt(v):
+            if v is None:
+                return None
+            return f"ARS {v:,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
+
+        for i in data:
+            for k in ["turista","business","primera","economica"]:
+                i[k] = fmt(i.get(k))
+
+            t = i.get("turista")
+            b = i.get("business")
+            if t and b:
+                vt = float(t.replace("ARS ","").replace(".","").replace(",","."))
+                vb = float(b.replace("ARS ","").replace(".","").replace(",","."))
+                i["diferencia"] = fmt(vb-vt)
+            else:
+                i["diferencia"] = None
+
+        return 200, data
+
     def fetch_price(self, origen: str, destino: str, fecha: str) -> Tuple[int, Any]:
         """
         Llamada base que devuelve el “bundle” con todas las salidas del día (clave 'sailingprice').
@@ -763,6 +940,20 @@ class BuquebusClient:
         }
         return self._call_price_availability(payload)
 
+    def _post_day_all_classes(self, origen, destino, fecha):
+        yy, mm, dd = self._normalize_date_to_yymmdd(fecha)
+        payload = self._payload_day(origen, destino, yy, mm, dd, "TSEAT")
+
+        payload["request"]["c_MTT_MultipleTariffTypeRequest"][0][
+            "m_TARF_TariffCodeTypeDescription"
+        ] = [
+            {"c_U282_TariffType": "PROGRAMADA", "c_C113_PriceDetailRequested": "true"},
+            {"c_U282_TariffType": "FLEXIBLE",   "c_C113_PriceDetailRequested": "true"},
+            {"c_U282_TariffType": "ECONOMICA",  "c_C113_PriceDetailRequested": "true"},
+        ]
+
+        return self._call_price_availability(payload)
+
 
     def _totales_programada_por_sailing(self, raw_json: dict) -> dict:
         """Extrae los totales PROGRAMADA por sailing."""
@@ -957,4 +1148,69 @@ class BuquebusClient:
 
         return 200, results
 
+    def fetch_day_web_prices_full(self, origen, destino, fecha):
+        # EXISTENTE
+        _, raw_t = self._post_day_pricing(origen, destino, fecha, "TSEAT")
+        mapa_t = self._totales_programada_por_sailing(raw_t)
+
+        _, raw_b = self._post_day_pricing(origen, destino, fecha, "BSEAT")
+        mapa_b = self._totales_programada_por_sailing(raw_b)
+
+        # NUEVO
+        _, raw_p = self._post_day_pricing(origen, destino, fecha, "PRSEAT")
+        mapa_p = self._totales_programada_por_sailing(raw_p)
+
+        _, raw_e = self._post_day_pricing_economica(origen, destino, fecha, "ESEAT")
+        mapa_e = self._totales_por_tarifa(raw_e, "ECONOMICA")
+
+        def fmt(v):
+            return f"ARS {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+        codes = set(mapa_t) | set(mapa_b) | set(mapa_p) | set(mapa_e)
+
+        out = []
+
+        for code in sorted(codes):
+            tur, hs, ha, ship = mapa_t.get(code,(None,None,None,None))
+            bus, _, _, _       = mapa_b.get(code,(None,None,None,None))
+            pri, _, _, _       = mapa_p.get(code,(None,None,None,None))
+            eco, _, _, _       = mapa_e.get(code,(None,None,None,None))
+
+            out.append({
+                "hora_salida": hs,
+                "hora_llegada": ha,
+                "barco": ship,
+                "codigo": code,
+
+                # EXISTENTE
+                "turista": fmt(tur) if tur else None,
+                "business": fmt(bus) if bus else None,
+
+                # NUEVO
+                "economica": fmt(eco) if eco else None,
+                "primera": fmt(pri) if pri else None,
+            })
+
+        return 200, out
+
+    def fetch_day_web_prices_pro(self, origen, destino, fecha):
+        status, raw = self._post_day_all_classes(origen, destino, fecha)
+
+        if status != 200:
+            return status, raw
+
+        data = self._extract_classes_from_bundle(raw)
+
+        def fmt(v):
+            if v is None:
+                return None
+            return f"ARS {v:,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
+
+        for i in data:
+            for k in ["turista","business","diferencia","economica","primera"]:
+                i[k] = fmt(i.get(k))
+
+        data.sort(key=lambda x: x["hora_salida"] or "99:99")
+
+        return 200, data
 
