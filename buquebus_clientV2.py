@@ -118,6 +118,9 @@ class BuquebusClientV2(BuquebusClient):
     # --------------------------------------------------
     def fetch_day_web_prices_pro(self, origen, destino, fecha):
 
+        # 🔥 asegurar token antes del paralelo
+        self._get_valid_token()
+
         # EXACTAMENTE igual que la web real → en paralelo
         with ThreadPoolExecutor(max_workers=4) as ex:
             fut_t = ex.submit(self._post_day_pricing, origen, destino, fecha, "TSEAT")
